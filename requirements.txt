@@ -1,0 +1,5 @@
+discord.py[voice]>=2.6
+davey
+python-dotenv>=1.0
+mutagen>=1.47
+pymongo[srv]>=4.13
