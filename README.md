@@ -13,8 +13,14 @@ Discord music bot — no YouTube. Plays your own/licensed files, direct audio UR
 **Vault (like Anyaluga):** `/addsongfromvideo` `/addsong` `/removesong` `/songlist` — songs live in MongoDB (`MONGODB_URI`), nothing to store on disk.
 `/play` `/playfile` `/radio` (endless shuffle of music/) `/station add|remove|play` `/pause` `/skip` `/stop` `/shuffle` `/loop` `/volume` `/queue` `/nowplaying`
 Panel buttons: ⏮ ⏯ ⏭ 🔁 ⏹ + signal-filter dropdown.
-Customize (Manage Server): `/tune theme|color|fx|eq|rescan|about|profile`
+Customize (Manage Server): `/tune theme|color|fx|rescan|about|profile|bg`
 **Eluga Studio card designer:** `/tune card layout|barstyle|footer|reset` — 8 themes (pinewood/static/ember/midnight/aurora/sakura/cyber/winter), 4 progress-bar styles, 3 card layouts (classic/compact/cinematic). Every change sends a live preview.
+**Now Playing background:** `/tune bg <theme>` — animated glyphs (aurora/ocean/rain/galaxy/sakura/fire/ice/night_city) cycled by the player's ticker roughly every 5s, alongside a live position update. Low-FPS by design — Discord rate-limits message edits, so this is text/emoji swaps, not a real GIF.
+**3-tier audio engine:**
+- **Basic** — `/volume` (0-300%, boosted volume gets an automatic limiter so it doesn't clip), `/tune eq_basic bass|vocal|treble`, `/tune fx` presets
+- **Pro** — `/tune eq_pro band gain` (11-band graphic EQ: 32Hz-16kHz), `/tune preamp`
+- **Advanced** ⚠ — `/tune eq_advanced compressor|reverb|width|normalize` (can distort/clip if pushed hard — that's on purpose, it's the "everything" tier)
+- `/tune eq_show` to see current settings, `/tune eq_reset`, `/tune eq_export` / `/tune eq_import <code>` to copy a preset to another server
 
 ## Make it yours
 - `theme.py` — palettes, taglines, all Thai bot messages (`MSG`)

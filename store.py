@@ -11,11 +11,16 @@ DEFAULTS = {
     "theme": "pinewood",
     "custom_color": None,
     "fx": "off",
-    "eq": {"bass": 0, "treble": 0},
+    "eq": {"bass": 0, "vocal": 0, "treble": 0},
+    "eq_pro": {},
+    "preamp": 0,
+    "adv": {"compressor": False, "reverb": 0, "width": 0, "normalize": False},
+    "bg": "none",
     "volume": 60,
     "loop": "off",
     "stations": {},
 }
+_NESTED = ("eq", "adv")  # dicts that need missing sub-keys backfilled too, not just the top-level key
 
 
 class Store:
@@ -39,6 +44,9 @@ class Store:
         g = self.data.setdefault(str(guild_id), {})
         for k, v in DEFAULTS.items():
             g.setdefault(k, json.loads(json.dumps(v)))
+        for k in _NESTED:  # backfill sub-keys added by later versions into an already-saved dict
+            for sk, sv in DEFAULTS[k].items():
+                g[k].setdefault(sk, sv)
         return g
 
     def save(self):

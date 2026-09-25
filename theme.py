@@ -31,6 +31,25 @@ LAYOUTS = {
 
 CARD_DEFAULTS = {"layout": "classic", "bar": "blocks", "bar_width": 16, "show_footer_line": True}
 
+# animated Now Playing backgrounds — a few glyphs cycled ~every 5s by the player's ticker.
+# Kept to low-FPS text/emoji swaps (not real GIFs) specifically to stay well under Discord's edit rate limits.
+BG_THEMES = {
+    "none": [],
+    "aurora": ["🌌 ︶︶︶", "🌌 ︵︶︵", "🌌 ︶︵︶", "🌌 ︵︵︶"],
+    "ocean": ["🌊 ≈≈≈", "🌊 ≋≈≈", "🌊 ≈≋≈", "🌊 ≈≈≋"],
+    "rain": ["🌧️ ┆ ┆ ┆", "🌧️ ┊ ┆ ┊", "🌧️ ┆ ┊ ┆", "🌧️ ┊ ┊ ┆"],
+    "galaxy": ["🌠 · ⋆ ·", "🌠 ⋆ · ·", "🌠 · · ⋆", "🌠 ⋆ ⋆ ·"],
+    "sakura": ["🌸 · · ·", "🌸 · ✿ ·", "🌸 ✿ · ·", "🌸 · · ✿"],
+    "fire": ["🔥 ░▒▓", "🔥 ▒▓░", "🔥 ▓░▒", "🔥 ░▓▒"],
+    "ice": ["❄️ · ❄ ·", "❄️ ❄ · ·", "❄️ · · ❄", "❄️ ❄ ❄ ·"],
+    "night_city": ["🌃 ▁▂▃", "🌃 ▂▃▁", "🌃 ▃▁▂", "🌃 ▂▁▃"],
+}
+
+
+def bg_frame(g, i):
+    frames = BG_THEMES.get(g.get("bg", "none")) or []
+    return frames[i % len(frames)] if frames else None
+
 MSG = {
     "novoice": "🌲 ไม่มีใครอยู่ในป่านี้… เข้าห้องเสียงก่อน แล้วเรียกใหม่",
     "busy": "📻 ฉันกำลังส่งสัญญาณอยู่อีกห้อง ไปฟังที่นั่น หรือรอให้จบก่อน",
@@ -85,24 +104,26 @@ def _esc(s):
     return discord.utils.escape_markdown(str(s))
 
 
-def now_playing(g, title, artist, pos, dur, paused, qlen, by, fx_label):
+def now_playing(g, title, artist, pos, dur, paused, qlen, by, fx_label, bg_i=0):
     t, c = _t(g), _card(g)
     layout = c["layout"]
     state = "▮▮ paused" if paused else "▶ on air"
     time_str = f"{fmt(pos)} / {fmt(dur) if dur else 'live'}"
+    bgf = bg_frame(g, bg_i)
+    bg_line = f"`{bgf}`\n" if bgf else ""
 
     if layout == "compact":
-        desc = f"**{_esc(artist)}** · `{time_str}` · {state}\n`{bar(pos, dur, g)}`"
+        desc = f"{bg_line}**{_esc(artist)}** · `{time_str}` · {state}\n`{bar(pos, dur, g)}`"
         e = discord.Embed(color=color(g), title=f"{t['emoji']} {_esc(title)}"[:256], description=desc)
     elif layout == "cinematic":
-        desc = (f"*{t['line']}*\n\n## {_esc(title)}\n**{_esc(artist)}**\n"
+        desc = (f"{bg_line}*{t['line']}*\n\n## {_esc(title)}\n**{_esc(artist)}**\n"
                 f"`{bar(pos, dur, g)}`\n`{time_str}` · {state}")
         e = discord.Embed(color=color(g), description=desc)
     else:  # classic
         e = discord.Embed(
             color=color(g),
             title=f"▓▒░ {_esc(title)}"[:256],
-            description=f"**{_esc(artist)}**\n`{bar(pos, dur, g)}`\n`{time_str}` · {state}",
+            description=f"{bg_line}**{_esc(artist)}**\n`{bar(pos, dur, g)}`\n`{time_str}` · {state}",
         )
 
     field_map = {
@@ -144,8 +165,11 @@ def profile_embed(g, guild_name):
         ("Theme", f"{t['emoji']} {t['tag']}"),
         ("Card layout", f"{c['layout']} — {LAYOUTS.get(c['layout'], {}).get('desc', '')}"),
         ("Bar style", c["bar"]),
+        ("Now Playing bg", g.get("bg", "none")),
         ("FX", g["fx"]),
-        ("EQ", f"bass {g['eq']['bass']:+d} / treble {g['eq']['treble']:+d}"),
+        ("EQ", f"bass {g['eq']['bass']:+d} / vocal {g['eq'].get('vocal', 0):+d} / treble {g['eq']['treble']:+d}"),
+        ("Pro EQ bands set", str(sum(1 for v in (g.get('eq_pro') or {}).values() if v))),
+        ("Preamp", f"{g.get('preamp', 0):+d} dB"),
         ("Loop", g["loop"]),
         ("Volume", f"{g['volume']}%"),
         ("Stations saved", str(len(g.get("stations", {})))),

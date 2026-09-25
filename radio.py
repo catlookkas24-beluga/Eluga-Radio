@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import difflib
 import ipaddress
+import json
 import logging
 import os
 import random
@@ -87,6 +89,8 @@ class Player:
         self._offset = 0.0
         self._paused_at = None
         self._idle_task = None
+        self._ticker_task = None
+        self._bg_i = 0
 
     @property
     def g(self):
@@ -122,10 +126,28 @@ class Player:
         af = fx.build(self.g)
         opts = "-vn" + (f' -af "{af}"' if af else "")
         raw = discord.FFmpegPCMAudio(t.source, executable=self.cog.ffmpeg, before_options=before, options=opts)
-        self.src = discord.PCMVolumeTransformer(raw, self.g["volume"] / 100)
+        self.src = discord.PCMVolumeTransformer(raw, fx.player_volume(self.g))
         self._offset, self._t0, self._paused_at = seek, time.monotonic(), None
         vc.play(self.src, after=lambda e, gen=gen: asyncio.run_coroutine_threadsafe(self._after(e, gen), self.cog.bot.loop))
         self._cancel_idle()
+        self._ensure_ticker()
+
+    def _ensure_ticker(self):
+        if self._ticker_task is None or self._ticker_task.done():
+            self._ticker_task = asyncio.create_task(self._tick())
+
+    async def _tick(self):
+        """Low-FPS refresh: real-time position + one animated-background frame, every 5s.
+        Deliberately slow — Discord rate-limits message edits, this stays comfortably under that."""
+        try:
+            while self.current:
+                await asyncio.sleep(5)
+                if not self.current:
+                    break
+                self._bg_i += 1
+                await self.refresh_panel()
+        except asyncio.CancelledError:
+            pass
 
     async def _after(self, err, gen):
         if gen != self._gen:
@@ -214,7 +236,7 @@ class Player:
         if not t:
             return theme.idle_embed(self.g)
         return theme.now_playing(self.g, t.title, t.artist, self.pos(), t.duration,
-                                 self._paused_at is not None, len(self.queue), t.by, fx.label(self.g))
+                                 self._paused_at is not None, len(self.queue), t.by, fx.label(self.g), self._bg_i)
 
     async def send_panel(self):
         if self.panel:
@@ -250,6 +272,9 @@ class Player:
     async def destroy(self):
         self._gen += 1
         self._cancel_idle()
+        if self._ticker_task:
+            self._ticker_task.cancel()
+            self._ticker_task = None
         self.queue.clear()
         self.current = None
         self.radio = False
@@ -526,15 +551,20 @@ class Radio(commands.Cog):
         self.store.save()
         await i.response.send_message(f"🔁 {mode.value}")
 
-    @app_commands.command(name="volume", description="ระดับเสียง 0-100")
-    async def volume(self, i: discord.Interaction, level: app_commands.Range[int, 0, 100]):
+    @app_commands.command(name="volume", description="ระดับเสียง 0-300 (เกิน 100 = บูสต์เสียงจริง มีลิมิตเตอร์กันแตกให้)")
+    async def volume(self, i: discord.Interaction, level: app_commands.Range[int, 0, fx.VOLUME_MAX]):
         g = self.store.get(i.guild.id)
+        old = g["volume"]
         g["volume"] = level
         self.store.save()
         p = self.players.get(i.guild.id)
+        warn = " ⚠ เกิน 100% เสียงอาจเพี้ยนได้ถ้าเพลงดังอยู่แล้ว" if level > 100 else ""
+        await i.response.send_message(f"🔉 {level}%{warn}")
         if p and p.src:
-            p.src.volume = level / 100
-        await i.response.send_message(f"🔉 {level}%")
+            if level <= 100 and old <= 100:
+                p.src.volume = level / 100  # both sides of the boost line stay instant, no restart
+            else:
+                await p.restart_in_place()
 
     @app_commands.command(name="queue", description="ดูคิว")
     async def queue(self, i: discord.Interaction):
@@ -720,15 +750,133 @@ class Radio(commands.Cog):
         if p:
             await p.restart_in_place()
 
-    @tune.command(name="eq", description="ปรับเบส/แหลม (-10 ถึง +10 dB)")
-    async def t_eq(self, i: discord.Interaction, bass: app_commands.Range[int, -10, 10] = 0,
-                   treble: app_commands.Range[int, -10, 10] = 0):
-        self.store.get(i.guild.id)["eq"] = {"bass": bass, "treble": treble}
+    @tune.command(name="eq_basic", description="ปรับเสียงง่าย ๆ: เบส/เสียงร้อง/แหลม (-10 ถึง +10 dB)")
+    async def t_eq_basic(self, i: discord.Interaction,
+                          bass: app_commands.Range[int, -10, 10] | None = None,
+                          vocal: app_commands.Range[int, -10, 10] | None = None,
+                          treble: app_commands.Range[int, -10, 10] | None = None):
+        g = self.store.get(i.guild.id)
+        if bass is not None:
+            g["eq"]["bass"] = bass
+        if vocal is not None:
+            g["eq"]["vocal"] = vocal
+        if treble is not None:
+            g["eq"]["treble"] = treble
         self.store.save()
-        await i.response.send_message(f"🎚 bass {bass:+d} / treble {treble:+d}", ephemeral=True)
+        e = g["eq"]
+        await i.response.send_message(f"🎚 bass {e['bass']:+d} / vocal {e['vocal']:+d} / treble {e['treble']:+d}", ephemeral=True)
         p = self.players.get(i.guild.id)
         if p:
             await p.restart_in_place()
+
+    @tune.command(name="eq_pro", description="EQ 11 แบนด์ละเอียด (Pro)")
+    @app_commands.choices(band=[app_commands.Choice(name=lbl, value=k) for k, lbl in fx.BANDS])
+    async def t_eq_pro(self, i: discord.Interaction, band: app_commands.Choice[str], gain: app_commands.Range[int, -12, 12]):
+        g = self.store.get(i.guild.id)
+        g["eq_pro"][band.value] = gain
+        self.store.save()
+        await i.response.send_message(f"🎛️ {band.name} → {gain:+d} dB", ephemeral=True)
+        p = self.players.get(i.guild.id)
+        if p:
+            await p.restart_in_place()
+
+    @tune.command(name="preamp", description="เกนโดยรวมก่อนเข้า EQ (-20 ถึง +20 dB)")
+    async def t_preamp(self, i: discord.Interaction, gain: app_commands.Range[int, -20, 20]):
+        g = self.store.get(i.guild.id)
+        g["preamp"] = gain
+        self.store.save()
+        await i.response.send_message(f"🎚️ preamp {gain:+d} dB", ephemeral=True)
+        p = self.players.get(i.guild.id)
+        if p:
+            await p.restart_in_place()
+
+    @tune.command(name="eq_advanced", description="⚠ Advanced: compressor/reverb/stereo width/normalize — อาจทำให้เสียงเพี้ยนได้")
+    async def t_eq_advanced(self, i: discord.Interaction,
+                             compressor: bool | None = None,
+                             reverb: app_commands.Range[int, 0, 100] | None = None,
+                             width: app_commands.Range[int, 0, 200] | None = None,
+                             normalize: bool | None = None):
+        g = self.store.get(i.guild.id)
+        if compressor is not None:
+            g["adv"]["compressor"] = compressor
+        if reverb is not None:
+            g["adv"]["reverb"] = reverb
+        if width is not None:
+            g["adv"]["width"] = width
+        if normalize is not None:
+            g["adv"]["normalize"] = normalize
+        self.store.save()
+        a = g["adv"]
+        await i.response.send_message(
+            "🧪 **Advanced mode** — สำหรับผู้ใช้ที่เข้าใจการประมวลผลเสียง การตั้งค่าบางอย่างอาจทำให้เสียงผิดเพี้ยนหรือ clip ได้\n"
+            f"compressor `{a['compressor']}` · reverb `{a['reverb']}` · width `{a['width']}` · normalize `{a['normalize']}`",
+            ephemeral=True,
+        )
+        p = self.players.get(i.guild.id)
+        if p:
+            await p.restart_in_place()
+
+    @tune.command(name="eq_show", description="ดูค่าปรับเสียงทั้งหมดตอนนี้")
+    async def t_eq_show(self, i: discord.Interaction):
+        g = self.store.get(i.guild.id)
+        e = g["eq"]
+        bands = ", ".join(f"{lbl} {g['eq_pro'][k]:+d}" for k, lbl in fx.BANDS if g["eq_pro"].get(k)) or "—"
+        a = g["adv"]
+        desc = (f"**Basic** — bass {e['bass']:+d} · vocal {e['vocal']:+d} · treble {e['treble']:+d}\n"
+                f"**Pro** — preamp {g['preamp']:+d} dB · bands: {bands}\n"
+                f"**Advanced** — compressor {a['compressor']} · reverb {a['reverb']} · width {a['width']} · normalize {a['normalize']}\n"
+                f"**Volume** — {g['volume']}%")
+        await i.response.send_message(embed=discord.Embed(color=theme.color(g), title="🎧 EQ / audio settings", description=desc), ephemeral=True)
+
+    @tune.command(name="eq_reset", description="รีเซ็ตการปรับเสียงทั้งหมด")
+    async def t_eq_reset(self, i: discord.Interaction):
+        g = self.store.get(i.guild.id)
+        g["eq"] = dict(fx.EQ_DEFAULTS)
+        g["eq_pro"] = {}
+        g["preamp"] = 0
+        g["adv"] = dict(fx.ADV_DEFAULTS)
+        self.store.save()
+        await i.response.send_message("↺ eq reset", ephemeral=True)
+        p = self.players.get(i.guild.id)
+        if p:
+            await p.restart_in_place()
+
+    @tune.command(name="eq_export", description="ส่งออกค่าปรับเสียงเป็นโค้ด แชร์ให้เซิร์ฟเวอร์อื่นได้")
+    async def t_eq_export(self, i: discord.Interaction):
+        g = self.store.get(i.guild.id)
+        payload = {"eq": g["eq"], "eq_pro": g["eq_pro"], "preamp": g["preamp"], "adv": g["adv"]}
+        code = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+        await i.response.send_message(f"💾 โค้ดพรีเซ็ตของคุณ (ใช้กับ `/tune eq_import`):\n```\n{code}\n```", ephemeral=True)
+
+    @tune.command(name="eq_import", description="นำเข้าโค้ดพรีเซ็ตเสียงจาก /tune eq_export")
+    async def t_eq_import(self, i: discord.Interaction, code: str):
+        try:
+            payload = json.loads(base64.urlsafe_b64decode(code.encode()).decode())
+            g = self.store.get(i.guild.id)
+            g["eq"] = {**fx.EQ_DEFAULTS, **{k: v for k, v in payload.get("eq", {}).items() if k in fx.EQ_DEFAULTS}}
+            g["eq_pro"] = {k: v for k, v in payload.get("eq_pro", {}).items() if k in dict(fx.BANDS)}
+            g["preamp"] = max(-20, min(20, int(payload.get("preamp", 0))))
+            adv = payload.get("adv", {})
+            g["adv"] = {**fx.ADV_DEFAULTS, "compressor": bool(adv.get("compressor")), "reverb": max(0, min(100, int(adv.get("reverb", 0)))),
+                       "width": max(0, min(200, int(adv.get("width", 0)))), "normalize": bool(adv.get("normalize"))}
+        except Exception:
+            return await i.response.send_message("▒ โค้ดนี้ใช้ไม่ได้", ephemeral=True)
+        self.store.save()
+        await i.response.send_message("✅ นำเข้าพรีเซ็ตแล้ว", ephemeral=True)
+        p = self.players.get(i.guild.id)
+        if p:
+            await p.restart_in_place()
+
+    @tune.command(name="bg", description="พื้นหลังเคลื่อนไหวบนการ์ด Now Playing (อัปเดตทุก ~5 วิ)")
+    @app_commands.choices(name=[app_commands.Choice(name=k, value=k) for k in theme.BG_THEMES])
+    async def t_bg(self, i: discord.Interaction, name: app_commands.Choice[str]):
+        g = self.store.get(i.guild.id)
+        g["bg"] = name.value
+        self.store.save()
+        await i.response.send_message(f"🖼️ now playing bg → **{name.value}**", ephemeral=True)
+        p = self.players.get(i.guild.id)
+        if p:
+            await p.refresh_panel()
 
     @tune.command(name="rescan", description="สแกนโฟลเดอร์เพลงใหม่")
     async def t_rescan(self, i: discord.Interaction):
