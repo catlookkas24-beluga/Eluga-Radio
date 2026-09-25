@@ -14,13 +14,36 @@ THEMES = {
     "winter":   {"color": 0x2E4057, "emoji": "❄️", "tag": "winter", "line": "the frequency is cold tonight"},
 }
 
-# progress-bar renderers — add a key here and it shows up in /tune card barstyle automatically
-BARS = {
-    "blocks": lambda n, w: "▰" * n + "◉" + "▱" * (w - 1 - n),
-    "dots":   lambda n, w: "●" * n + "○" + "·" * (w - 1 - n),
-    "wave":   lambda n, w: "▬" * n + "◆" + "─" * (w - 1 - n),
-    "arrows": lambda n, w: "=" * n + ">" + " " * (w - 1 - n),
+# progress-bar renderers — add a key here and it shows up in /tune card barstyle automatically.
+# Each is (filled, marker, empty) tiled across the bar width.
+_BAR_GLYPHS = {
+    "blocks":   ("▰", "◉", "▱"),
+    "dots":     ("●", "○", "·"),
+    "wave":     ("▬", "◆", "─"),
+    "arrows":   ("=", ">", " "),
+    "hearts":   ("♥", "❤", "♡"),
+    "stars":    ("★", "✦", "☆"),
+    "notes":    ("♪", "♫", "·"),
+    "squares":  ("■", "◆", "□"),
+    "circles":  ("⬤", "◉", "○"),
+    "diamonds": ("◆", "✦", "◇"),
+    "pipes":    ("│", "┃", "┆"),
+    "shade":    ("█", "▓", "░"),
+    "braille":  ("⣿", "⣤", "⠂"),
+    "petals":   ("✿", "❀", "·"),
+    "ocean":    ("≈", "≋", "·"),
+    "carets":   ("^", "⌃", "‾"),
+    "ticks":    ("✓", "✔", "·"),
+    "plus":     ("+", "⊕", "·"),
+    "hash":     ("#", "▣", "-"),
+    "bullets":  ("•", "●", "∘"),
+    "lines":    ("―", "▮", "·"),
+    "gems":     ("♦", "✦", "◇"),
+    "moons":    ("●", "☾", "○"),
+    "suns":     ("☀", "✹", "·"),
+    "petals2":  ("❁", "✾", "·"),
 }
+BARS = {name: (lambda n, w, f=f, m=m, e=e: f * n + m + e * (w - 1 - n)) for name, (f, m, e) in _BAR_GLYPHS.items()}
 
 # card layouts — which fields show on the Now Playing card, and in what shape
 LAYOUTS = {
@@ -31,24 +54,35 @@ LAYOUTS = {
 
 CARD_DEFAULTS = {"layout": "classic", "bar": "blocks", "bar_width": 16, "show_footer_line": True}
 
-# animated Now Playing backgrounds — a few glyphs cycled ~every 5s by the player's ticker.
-# Kept to low-FPS text/emoji swaps (not real GIFs) specifically to stay well under Discord's edit rate limits.
+# animated Now Playing backgrounds — a rolling window over a glyph string, cycled ~every 5s by
+# the player's ticker. Symbols only (no pictograph emoji mixed into the pattern), tiled to fill
+# the full card width. Kept to low-FPS text swaps (not real GIFs) to stay under Discord's edit
+# rate limits. "aurora" is rendered in green only, via a Discord ```ansi code block.
+BG_WIDTH = 28
 BG_THEMES = {
-    "none": [],
-    "aurora": ["🌌 ︶︶︶", "🌌 ︵︶︵", "🌌 ︶︵︶", "🌌 ︵︵︶"],
-    "ocean": ["🌊 ≈≈≈", "🌊 ≋≈≈", "🌊 ≈≋≈", "🌊 ≈≈≋"],
-    "rain": ["🌧️ ┆ ┆ ┆", "🌧️ ┊ ┆ ┊", "🌧️ ┆ ┊ ┆", "🌧️ ┊ ┊ ┆"],
-    "galaxy": ["🌠 · ⋆ ·", "🌠 ⋆ · ·", "🌠 · · ⋆", "🌠 ⋆ ⋆ ·"],
-    "sakura": ["🌸 · · ·", "🌸 · ✿ ·", "🌸 ✿ · ·", "🌸 · · ✿"],
-    "fire": ["🔥 ░▒▓", "🔥 ▒▓░", "🔥 ▓░▒", "🔥 ░▓▒"],
-    "ice": ["❄️ · ❄ ·", "❄️ ❄ · ·", "❄️ · · ❄", "❄️ ❄ ❄ ·"],
-    "night_city": ["🌃 ▁▂▃", "🌃 ▂▃▁", "🌃 ▃▁▂", "🌃 ▂▁▃"],
+    "none": None,
+    "aurora": "▁▂▃▅▇▇▅▃▂▁▂▃▅▇▅▃",
+    "ocean": "≈≋≈~≈≋≈~≈≋≈~≈≋≈~",
+    "rain": "┆┊¦│┆┊¦│┆┊¦│┆┊¦│",
+    "galaxy": "·⋆∘⁘·⋆∘⁘·⋆∘⁘·⋆∘⁘",
+    "sakura": "⋆✧∘·⋆✧∘·⋆✧∘·⋆✧∘·",
+    "fire": "░▒▓█▓▒░▒▓█▓▒░▒▓█",
+    "ice": "·❆✶∘·❆✶∘·❆✶∘·❆✶∘",
+    "night_city": "▁▂▃▅▇▅▃▂▁▂▃▅▇▅▃▂",
 }
 
 
-def bg_frame(g, i):
-    frames = BG_THEMES.get(g.get("bg", "none")) or []
-    return frames[i % len(frames)] if frames else None
+def bg_frame(g, i, width: int = BG_WIDTH):
+    chars = BG_THEMES.get(g.get("bg", "none"))
+    if not chars:
+        return None
+    n = len(chars)
+    offset = i % n
+    tiled = chars * (width // n + 2)
+    frame = tiled[offset:offset + width]
+    if g.get("bg") == "aurora":  # green-only, real color via Discord's ansi code-block support
+        return f"```ansi\n\u001b[32m{frame}\u001b[0m\n```"
+    return f"`{frame}`"
 
 MSG = {
     "novoice": "🌲 ไม่มีใครอยู่ในป่านี้… เข้าห้องเสียงก่อน แล้วเรียกใหม่",
@@ -110,7 +144,7 @@ def now_playing(g, title, artist, pos, dur, paused, qlen, by, fx_label, bg_i=0):
     state = "▮▮ paused" if paused else "▶ on air"
     time_str = f"{fmt(pos)} / {fmt(dur) if dur else 'live'}"
     bgf = bg_frame(g, bg_i)
-    bg_line = f"`{bgf}`\n" if bgf else ""
+    bg_line = f"{bgf}\n" if bgf else ""
 
     if layout == "compact":
         desc = f"{bg_line}**{_esc(artist)}** · `{time_str}` · {state}\n`{bar(pos, dur, g)}`"

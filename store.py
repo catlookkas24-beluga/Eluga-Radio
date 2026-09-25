@@ -13,6 +13,7 @@ DEFAULTS = {
     "fx": "off",
     "eq": {"bass": 0, "vocal": 0, "treble": 0},
     "eq_pro": {},
+    "eq_pro_presets": {},
     "preamp": 0,
     "adv": {"compressor": False, "reverb": 0, "width": 0, "normalize": False},
     "bg": "none",

@@ -29,6 +29,20 @@ EQ_DEFAULTS = {"bass": 0, "vocal": 0, "treble": 0}          # Basic tier
 ADV_DEFAULTS = {"compressor": False, "reverb": 0, "width": 0, "normalize": False}  # Advanced tier
 VOLUME_MAX = 300  # % — anything over 100 is a real gain boost, not just attenuation
 
+# tier ranges, shared by the slash commands and the interactive /tune eq panel
+BASIC_MAX = 15     # dB either side on bass/vocal/treble — ~30 levels at 1dB steps
+BASIC_STEP = 1
+PRO_MAX = 20       # dB either side, per band
+PRO_STEP = 2
+PREAMP_MAX = 20
+PREAMP_STEP = 2
+ADV_REVERB_MAX = 100
+ADV_WIDTH_MAX = 200
+ADV_STEP = 10
+
+BAND_SHORT = {"32": "32", "60": "60", "120": "120", "144": "144", "256": "256",
+              "512": "512", "1000": "1k", "2000": "2k", "4000": "4k", "8000": "8k", "16000": "16k"}
+
 
 def label(g):
     name = PRESETS.get(g["fx"], PRESETS["off"])[0]
@@ -97,3 +111,19 @@ def build(g):
 def player_volume(g):
     """What discord.PCMVolumeTransformer.volume should be — capped at 1.0 since >100% is done in ffmpeg (see build())."""
     return min(g.get("volume", 60), 100) / 100
+
+
+def freq_chart(pro: dict) -> str:
+    """Small ascii frequency-response readout for the Pro EQ panel — 5 dB rows x 11 bands."""
+    rows = (20, 10, 0, -10, -20)
+    lines = []
+    for r in rows:
+        prefix = f"{r:+3d}dB" if r else " 0dB"
+        cells = []
+        for key, _ in BANDS:
+            gain = pro.get(key, 0) or 0
+            nearest = min(rows, key=lambda x: abs(x - gain))
+            cells.append("●" if nearest == r else ("─" if r == 0 else " "))
+        lines.append(f"{prefix} " + " ".join(cells))
+    axis = "      " + " ".join(BAND_SHORT[k].rjust(3) for k, _ in BANDS)
+    return "\n".join(lines) + "\n" + axis
