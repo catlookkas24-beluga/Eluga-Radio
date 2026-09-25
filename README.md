@@ -13,7 +13,8 @@ Discord music bot — no YouTube. Plays your own/licensed files, direct audio UR
 **Vault (like Anyaluga):** `/addsongfromvideo` `/addsong` `/removesong` `/songlist` — songs live in MongoDB (`MONGODB_URI`), nothing to store on disk.
 `/play` `/playfile` `/radio` (endless shuffle of music/) `/station add|remove|play` `/pause` `/skip` `/stop` `/shuffle` `/loop` `/volume` `/queue` `/nowplaying`
 Panel buttons: ⏮ ⏯ ⏭ 🔁 ⏹ + signal-filter dropdown.
-Customize (Manage Server): `/tune theme|color|fx|eq|rescan|about`
+Customize (Manage Server): `/tune theme|color|fx|eq|rescan|about|profile`
+**Eluga Studio card designer:** `/tune card layout|barstyle|footer|reset` — 8 themes (pinewood/static/ember/midnight/aurora/sakura/cyber/winter), 4 progress-bar styles, 3 card layouts (classic/compact/cinematic). Every change sends a live preview.
 
 ## Make it yours
 - `theme.py` — palettes, taglines, all Thai bot messages (`MSG`)

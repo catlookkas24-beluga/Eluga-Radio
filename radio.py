@@ -692,7 +692,8 @@ class Radio(commands.Cog):
         g["theme"], g["custom_color"] = name.value, None
         self.store.save()
         p = self.players.get(i.guild.id)
-        await i.response.send_message(f"{theme.THEMES[name.value]['tag']} — {theme.THEMES[name.value]['line']}", ephemeral=True)
+        t = theme.THEMES[name.value]
+        await i.response.send_message(f"{t['emoji']} {t['tag']} — {t['line']}", ephemeral=True)
         if p:
             await p.refresh_panel()
 
@@ -738,6 +739,50 @@ class Radio(commands.Cog):
     async def t_about(self, i: discord.Interaction):
         line = getattr(self.bot, "ffmpeg_line", "unknown")
         await i.response.send_message(f"```\n{line}\nlibrary: {len(self.library)} tracks\n```", ephemeral=True)
+
+    @tune.command(name="profile", description="สรุปการตั้งค่าทั้งหมดของเซิร์ฟเวอร์นี้")
+    async def t_profile(self, i: discord.Interaction):
+        await i.response.send_message(embed=theme.profile_embed(self.store.get(i.guild.id), i.guild.name))
+
+    # ---- card designer ----------------------------------------------------
+    card = app_commands.Group(
+        name="card", parent=tune, description="ออกแบบหน้าตา Now Playing card",
+    )
+
+    async def _card_preview(self, i: discord.Interaction, note: str):
+        g = self.store.get(i.guild.id)
+        self.store.save()
+        embed = theme.now_playing(g, "ตัวอย่างเพลง (Preview)", "Eluga Radio", 62, 214, False, 3, i.user.display_name, fx.label(g))
+        await i.response.send_message(f"{note}\n▾ ตัวอย่าง:", embed=embed, ephemeral=True)
+        p = self.players.get(i.guild.id)
+        if p:
+            await p.refresh_panel()
+
+    @card.command(name="layout", description="เลือกโครงหน้าตาการ์ดเพลง")
+    @app_commands.choices(name=[app_commands.Choice(name=f"{k} — {v['desc']}", value=k) for k, v in theme.LAYOUTS.items()])
+    async def c_layout(self, i: discord.Interaction, name: app_commands.Choice[str]):
+        g = self.store.get(i.guild.id)
+        g.setdefault("card", dict(theme.CARD_DEFAULTS))["layout"] = name.value
+        await self._card_preview(i, f"🖼️ layout → **{name.value}**")
+
+    @card.command(name="barstyle", description="เลือกสไตล์แถบเวลาเพลง")
+    @app_commands.choices(name=[app_commands.Choice(name=k, value=k) for k in theme.BARS])
+    async def c_bar(self, i: discord.Interaction, name: app_commands.Choice[str]):
+        g = self.store.get(i.guild.id)
+        g.setdefault("card", dict(theme.CARD_DEFAULTS))["bar"] = name.value
+        await self._card_preview(i, f"▬ progress bar → **{name.value}**")
+
+    @card.command(name="footer", description="แสดงบรรทัดธีมท้ายการ์ดหรือไม่")
+    async def c_footer(self, i: discord.Interaction, show: bool):
+        g = self.store.get(i.guild.id)
+        g.setdefault("card", dict(theme.CARD_DEFAULTS))["show_footer_line"] = show
+        await self._card_preview(i, f"📝 footer line → **{'on' if show else 'off'}**")
+
+    @card.command(name="reset", description="รีเซ็ตการ์ดกลับค่าเริ่มต้น (classic)")
+    async def c_reset(self, i: discord.Interaction):
+        g = self.store.get(i.guild.id)
+        g["card"] = dict(theme.CARD_DEFAULTS)
+        await self._card_preview(i, "↺ reset to classic")
 
     # ---- housekeeping ---------------------------------------------------
     @commands.Cog.listener()

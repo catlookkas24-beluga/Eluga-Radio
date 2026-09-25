@@ -1,12 +1,35 @@
-"""Modern-creepy look & feel. Change colours, taglines and MSG text freely."""
+"""Eluga Studio — themes, Music Card layouts, and all bot copy live here.
+Add a theme: one line in THEMES. Add a bar style: one line in BARS.
+"""
 import discord
 
 THEMES = {
-    "pinewood": {"color": 0x1F3D2B, "tag": "🌲 pinewood", "line": "the trees are listening"},
-    "static": {"color": 0x4A4D4C, "tag": "📻 static", "line": "signal unstable. do not adjust."},
-    "ember": {"color": 0x7A1616, "tag": "🕯️ ember", "line": "someone is humming on the frequency"},
-    "midnight": {"color": 0x0A0F1E, "tag": "🌑 midnight", "line": "it is later than you think"},
+    "pinewood": {"color": 0x1F3D2B, "emoji": "🌲", "tag": "pinewood", "line": "the trees are listening"},
+    "static":   {"color": 0x4A4D4C, "emoji": "📻", "tag": "static", "line": "signal unstable. do not adjust."},
+    "ember":    {"color": 0x7A1616, "emoji": "🕯️", "tag": "ember", "line": "someone is humming on the frequency"},
+    "midnight": {"color": 0x0A0F1E, "emoji": "🌑", "tag": "midnight", "line": "it is later than you think"},
+    "aurora":   {"color": 0x1A5C6B, "emoji": "🌌", "tag": "aurora", "line": "something drifts overhead"},
+    "sakura":   {"color": 0xB5567A, "emoji": "🌸", "tag": "sakura", "line": "petals fall, the signal stays"},
+    "cyber":    {"color": 0x00C2A8, "emoji": "⚡", "tag": "cyber", "line": "connection: stable? unclear."},
+    "winter":   {"color": 0x2E4057, "emoji": "❄️", "tag": "winter", "line": "the frequency is cold tonight"},
 }
+
+# progress-bar renderers — add a key here and it shows up in /tune card barstyle automatically
+BARS = {
+    "blocks": lambda n, w: "▰" * n + "◉" + "▱" * (w - 1 - n),
+    "dots":   lambda n, w: "●" * n + "○" + "·" * (w - 1 - n),
+    "wave":   lambda n, w: "▬" * n + "◆" + "─" * (w - 1 - n),
+    "arrows": lambda n, w: "=" * n + ">" + " " * (w - 1 - n),
+}
+
+# card layouts — which fields show on the Now Playing card, and in what shape
+LAYOUTS = {
+    "classic":   {"desc": "artist + bar + fields grid", "fields": ("signal", "vol", "loop", "next")},
+    "compact":   {"desc": "one-line status, no field grid", "fields": ()},
+    "cinematic": {"desc": "big title, fewer fields, mood line up top", "fields": ("signal", "next")},
+}
+
+CARD_DEFAULTS = {"layout": "classic", "bar": "blocks", "bar_width": 16, "show_footer_line": True}
 
 MSG = {
     "novoice": "🌲 ไม่มีใครอยู่ในป่านี้… เข้าห้องเสียงก่อน แล้วเรียกใหม่",
@@ -32,6 +55,12 @@ def _t(g):
     return THEMES.get(g["theme"], THEMES["pinewood"])
 
 
+def _card(g):
+    c = dict(CARD_DEFAULTS)
+    c.update(g.get("card") or {})
+    return c
+
+
 def color(g):
     return discord.Color(g["custom_color"] if g.get("custom_color") is not None else _t(g)["color"])
 
@@ -42,11 +71,14 @@ def fmt(sec):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def bar(pos, dur, w=16):
+def bar(pos, dur, g):
+    c = _card(g)
+    w = c["bar_width"]
     if not dur:
         return "▒░▒░ LIVE ░▒░▒░▒░▒"
-    n = min(w - 1, int(w * pos / dur))
-    return "▰" * n + "◉" + "▱" * (w - 1 - n)
+    n = min(w - 1, max(0, int(w * pos / dur)))
+    draw = BARS.get(c["bar"], BARS["blocks"])
+    return draw(n, w)
 
 
 def _esc(s):
@@ -54,25 +86,46 @@ def _esc(s):
 
 
 def now_playing(g, title, artist, pos, dur, paused, qlen, by, fx_label):
-    t = _t(g)
+    t, c = _t(g), _card(g)
+    layout = c["layout"]
     state = "▮▮ paused" if paused else "▶ on air"
-    e = discord.Embed(
-        color=color(g),
-        title=f"▓▒░ {_esc(title)}"[:256],
-        description=f"**{_esc(artist)}**\n`{bar(pos, dur)}`\n`{fmt(pos)} / {fmt(dur) if dur else 'live'}` · {state}",
-    )
-    e.add_field(name="signal", value=fx_label, inline=True)
-    e.add_field(name="vol", value=f"{g['volume']}%", inline=True)
-    e.add_field(name="loop", value=g["loop"], inline=True)
-    e.add_field(name="next", value=f"{qlen} in queue", inline=True)
-    e.set_footer(text=f"{t['tag']} · {t['line']} · req. {by}")
+    time_str = f"{fmt(pos)} / {fmt(dur) if dur else 'live'}"
+
+    if layout == "compact":
+        desc = f"**{_esc(artist)}** · `{time_str}` · {state}\n`{bar(pos, dur, g)}`"
+        e = discord.Embed(color=color(g), title=f"{t['emoji']} {_esc(title)}"[:256], description=desc)
+    elif layout == "cinematic":
+        desc = (f"*{t['line']}*\n\n## {_esc(title)}\n**{_esc(artist)}**\n"
+                f"`{bar(pos, dur, g)}`\n`{time_str}` · {state}")
+        e = discord.Embed(color=color(g), description=desc)
+    else:  # classic
+        e = discord.Embed(
+            color=color(g),
+            title=f"▓▒░ {_esc(title)}"[:256],
+            description=f"**{_esc(artist)}**\n`{bar(pos, dur, g)}`\n`{time_str}` · {state}",
+        )
+
+    field_map = {
+        "signal": ("signal", fx_label),
+        "vol": ("vol", f"{g['volume']}%"),
+        "loop": ("loop", g["loop"]),
+        "next": ("next", f"{qlen} in queue"),
+    }
+    for key in LAYOUTS.get(layout, LAYOUTS["classic"])["fields"]:
+        name, value = field_map[key]
+        e.add_field(name=name, value=value, inline=True)
+
+    if c["show_footer_line"]:
+        e.set_footer(text=f"{t['emoji']} {t['tag']} · {t['line']} · req. {by}")
+    else:
+        e.set_footer(text=f"req. {by}")
     return e
 
 
 def idle_embed(g):
     t = _t(g)
     e = discord.Embed(color=color(g), title="░▒▓ signal lost", description="ไม่มีอะไรออกอากาศแล้ว… ตอนนี้")
-    e.set_footer(text=f"{t['tag']} · {t['line']}")
+    e.set_footer(text=f"{t['emoji']} {t['tag']} · {t['line']}")
     return e
 
 
@@ -81,5 +134,23 @@ def queue_embed(g, now, items):
     lines = [f"`{i + 1:02d}` {_esc(a)} — {_esc(b)}" for i, (a, b) in enumerate(items[:10])]
     more = f"\n… +{len(items) - 10} more" if len(items) > 10 else ""
     e = discord.Embed(color=color(g), title="▓▒░ queue", description=(f"**now:** {_esc(now)}\n\n" if now else "") + ("\n".join(lines) or "empty") + more)
-    e.set_footer(text=f"{t['tag']} · {t['line']}")
+    e.set_footer(text=f"{t['emoji']} {t['tag']} · {t['line']}")
+    return e
+
+
+def profile_embed(g, guild_name):
+    t, c = _t(g), _card(g)
+    rows = [
+        ("Theme", f"{t['emoji']} {t['tag']}"),
+        ("Card layout", f"{c['layout']} — {LAYOUTS.get(c['layout'], {}).get('desc', '')}"),
+        ("Bar style", c["bar"]),
+        ("FX", g["fx"]),
+        ("EQ", f"bass {g['eq']['bass']:+d} / treble {g['eq']['treble']:+d}"),
+        ("Loop", g["loop"]),
+        ("Volume", f"{g['volume']}%"),
+        ("Stations saved", str(len(g.get("stations", {})))),
+    ]
+    desc = "\n".join(f"**{k}** — {v}" for k, v in rows)
+    e = discord.Embed(color=color(g), title=f"{t['emoji']} ELUGA PROFILE", description=desc)
+    e.set_footer(text=guild_name)
     return e
