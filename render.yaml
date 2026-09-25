@@ -1,0 +1,19 @@
+services:
+  - type: worker
+    name: eluga-radio
+    runtime: docker
+    plan: starter
+    region: singapore
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: MUSIC_DIR
+        value: /data/music
+      - key: DATA_DIR
+        value: /data
+    disk:
+      name: eluga-data
+      mountPath: /data
+      sizeGB: 1

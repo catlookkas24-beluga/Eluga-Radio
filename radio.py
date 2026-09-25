@@ -365,7 +365,7 @@ class EQPanel(discord.ui.View):
     dropdown to switch mode, +/- buttons to adjust, Reset All always available."""
 
     def __init__(self, cog: "Radio", guild_id: int, mode: str = "basic", band: str | None = None):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)  # was 300s — buttons kept silently dying mid-session; match Panel's persistent style
         self.cog, self.guild_id, self.mode = cog, guild_id, mode
         self.band = band or fx.BANDS[0][0]
         self._build()
@@ -408,7 +408,7 @@ class EQPanel(discord.ui.View):
     def _build_basic(self):
         for row, (key, label) in enumerate((("bass", "เบส"), ("vocal", "เสียงร้อง"), ("treble", "แหลม")), start=1):
             minus = discord.ui.Button(label=f"{label} −", style=discord.ButtonStyle.secondary, row=row)
-            plus = discord.ui.Button(label=f"{label} +", style=discord.ButtonStyle.secondary, row=row)
+            plus = discord.ui.Button(label=f"{label} +", style=discord.ButtonStyle.primary, row=row)
             minus.callback = self._basic_step(key, -1)
             plus.callback = self._basic_step(key, 1)
             self.add_item(minus)
@@ -438,7 +438,7 @@ class EQPanel(discord.ui.View):
         self.add_item(band_sel)
 
         band_minus = discord.ui.Button(label="แบนด์ −", style=discord.ButtonStyle.secondary, row=2)
-        band_plus = discord.ui.Button(label="แบนด์ +", style=discord.ButtonStyle.secondary, row=2)
+        band_plus = discord.ui.Button(label="แบนด์ +", style=discord.ButtonStyle.primary, row=2)
         band_minus.callback = self._pro_step(-1)
         band_plus.callback = self._pro_step(1)
         self.add_item(band_minus)
@@ -498,11 +498,11 @@ class EQPanel(discord.ui.View):
     def _build_advanced(self):
         adv = self.g["adv"]
         comp = discord.ui.Button(label=f"Compressor: {'on' if adv['compressor'] else 'off'}",
-                                  style=discord.ButtonStyle.secondary, row=1)
+                                  style=discord.ButtonStyle.success if adv["compressor"] else discord.ButtonStyle.secondary, row=1)
         comp.callback = self._toggle("compressor")
         self.add_item(comp)
         norm = discord.ui.Button(label=f"Normalize: {'on' if adv['normalize'] else 'off'}",
-                                  style=discord.ButtonStyle.secondary, row=1)
+                                  style=discord.ButtonStyle.success if adv["normalize"] else discord.ButtonStyle.secondary, row=1)
         norm.callback = self._toggle("normalize")
         self.add_item(norm)
 
@@ -550,24 +550,34 @@ class EQPanel(discord.ui.View):
 
     def embed(self):
         g = self.g
+        emb = discord.Embed(color=theme.color(g))
         if self.mode == "basic":
             e = g["eq"]
-            title = "📻 Basic EQ"
-            desc = (f"เบส `{e['bass']:+d} dB` · เสียงร้อง `{e['vocal']:+d} dB` · แหลม `{e['treble']:+d} dB`\n"
-                    f"ปรับได้ ±{fx.BASIC_MAX} dB ทีละ {fx.BASIC_STEP} dB ต่อการกด")
+            emb.title = "📻 Basic EQ"
+            emb.description = f"ปรับได้ ±{fx.BASIC_MAX} dB ทีละ {fx.BASIC_STEP} dB ต่อการกด"
+            for key, label, ic in (("bass", "เบส", "🥁"), ("vocal", "เสียงร้อง", "🎤"), ("treble", "แหลม", "✨")):
+                v = e[key]
+                emb.add_field(name=f"{ic} {label}", value=f"`{v:+3d} dB`\n{fx.slider(v, fx.BASIC_MAX)}", inline=True)
         elif self.mode == "pro":
             pro = g.get("eq_pro") or {}
-            title = "⚡ Pro EQ — 11-band"
-            desc = (f"Preamp `{g.get('preamp', 0):+d} dB` · แบนด์ที่เลือก `{fx.BAND_SHORT[self.band]}` "
-                    f"(`{pro.get(self.band, 0):+d} dB`)\n```\n{fx.freq_chart(pro)}\n```")
+            preamp = g.get("preamp", 0)
+            emb.title = "⚡ Pro EQ — 11-band"
+            emb.description = (f"**Preamp** `{preamp:+3d} dB`\n{fx.slider(preamp, fx.PREAMP_MAX, width=13)}\n"
+                                f"กำลังปรับ: **{fx.BAND_SHORT[self.band]}Hz** · ±{fx.PRO_MAX} dB ทีละ {fx.PRO_STEP} dB")
+            for key, _ in fx.BANDS:
+                v = pro.get(key, 0) or 0
+                mark = "🟢" if key == self.band else "🎚️"
+                emb.add_field(name=f"{mark} {fx.BAND_SHORT[key]}Hz", value=f"`{v:+3d}dB`\n{fx.slider(v, fx.PRO_MAX, width=7)}", inline=True)
         else:
             a = g["adv"]
-            title = "🎙️ Advanced EQ"
-            desc = ("⚠️ สำหรับผู้ใช้ที่ต้องการปรับแต่งละเอียด — บางค่าอาจทำให้เสียงแตกหรือดังผิดปกติ ปรับอย่างระมัดระวัง 🔊\n\n"
-                    f"Compressor `{a['compressor']}` · Normalize `{a['normalize']}`\n"
-                    f"Reverb `{a['reverb']}` · Stereo Width `{a['width']}`")
-        emb = discord.Embed(color=theme.color(g), title=title, description=desc)
-        emb.set_footer(text=fx.label(g))
+            emb.title = "🎙️ Advanced EQ"
+            emb.description = "⚠️ บางค่าอาจทำให้เสียงแตกหรือดังผิดปกติ ปรับอย่างระมัดระวัง 🔊"
+            emb.add_field(name="🗜️ Compressor", value="🟢 on" if a["compressor"] else "⚪ off", inline=True)
+            emb.add_field(name="📶 Normalize", value="🟢 on" if a["normalize"] else "⚪ off", inline=True)
+            emb.add_field(name="\u200b", value="\u200b", inline=True)
+            emb.add_field(name="🌊 Reverb", value=f"`{a['reverb']}`\n{fx.slider(a['reverb'], fx.ADV_REVERB_MAX, width=9, centered=False)}", inline=True)
+            emb.add_field(name="↔️ Stereo Width", value=f"`{a['width']}`\n{fx.slider(a['width'], fx.ADV_WIDTH_MAX, width=9, centered=False)}", inline=True)
+        emb.set_footer(text=f"🎧 signal: {fx.label(g)}")
         return emb
 
 

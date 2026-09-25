@@ -114,7 +114,8 @@ def player_volume(g):
 
 
 def freq_chart(pro: dict) -> str:
-    """Small ascii frequency-response readout for the Pro EQ panel — 5 dB rows x 11 bands."""
+    """Small ascii frequency-response readout — kept for text/export contexts (e.g. /tune eq_show).
+    The interactive panel uses per-band embed fields instead, since this wraps badly on mobile."""
     rows = (20, 10, 0, -10, -20)
     lines = []
     for r in rows:
@@ -127,3 +128,16 @@ def freq_chart(pro: dict) -> str:
         lines.append(f"{prefix} " + " ".join(cells))
     axis = "      " + " ".join(BAND_SHORT[k].rjust(3) for k, _ in BANDS)
     return "\n".join(lines) + "\n" + axis
+
+
+def slider(value: int, maximum: int, width: int = 9, centered: bool = True) -> str:
+    """A little mixing-console fader — used by the interactive EQ panel instead of raw numbers."""
+    if not centered:
+        pos = 0 if maximum <= 0 else round(max(0, min(value, maximum)) / maximum * (width - 1))
+        return "▰" * pos + "●" + "▱" * (width - 1 - pos)
+    pos = round((max(-maximum, min(value, maximum)) + maximum) / (2 * maximum) * (width - 1))
+    mid = width // 2
+    chars = ["┈"] * width
+    chars[mid] = "┆"
+    chars[pos] = "●"
+    return "".join(chars)
