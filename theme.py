@@ -3,6 +3,8 @@ Add a theme: one line in THEMES. Add a bar style: one line in BARS.
 """
 import discord
 
+import fx
+
 THEMES = {
     "pinewood": {"color": 0x1F3D2B, "emoji": "🌲", "tag": "pinewood", "line": "the trees are listening"},
     "static":   {"color": 0x4A4D4C, "emoji": "📻", "tag": "static", "line": "signal unstable. do not adjust."},
@@ -212,3 +214,59 @@ def profile_embed(g, guild_name):
     e = discord.Embed(color=color(g), title=f"{t['emoji']} ELUGA PROFILE", description=desc)
     e.set_footer(text=guild_name)
     return e
+
+
+def render_eq_graph(g, width: int = 760, height: int = 360) -> bytes:
+    """Draw an approximate frequency-response curve (20Hz-20kHz, ±24dB) as a PNG.
+    Combines Basic/Pro/Custom bands + highpass/lowpass — see fx.resp_db(). Visual guide, not a
+    measurement of the real ffmpeg output."""
+    import io
+    import math
+    from PIL import Image, ImageDraw, ImageFont
+
+    bg, grid, axis_txt = (13, 20, 15), (38, 58, 43), (150, 190, 160)
+    curve, fill, zero_line = (63, 220, 122), (63, 220, 122, 55), (90, 120, 95)
+
+    img = Image.new("RGB", (width, height), bg)
+    d = ImageDraw.Draw(img, "RGBA")
+    pad_l, pad_r, pad_t, pad_b = 48, 18, 16, 28
+    plot_w, plot_h = width - pad_l - pad_r, height - pad_t - pad_b
+    f_min, f_max, db_min, db_max = 20, 20000, -24, 24
+
+    def x_of(f):
+        return pad_l + (math.log10(f) - math.log10(f_min)) / (math.log10(f_max) - math.log10(f_min)) * plot_w
+
+    def y_of(db):
+        db = max(db_min, min(db_max, db))
+        return pad_t + (db_max - db) / (db_max - db_min) * plot_h
+
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    for fr in (20, 100, 1000, 10000, 20000):
+        x = x_of(fr)
+        d.line([(x, pad_t), (x, height - pad_b)], fill=grid, width=1)
+        d.text((x - 10, height - pad_b + 6), f"{fr // 1000}k" if fr >= 1000 else str(fr), fill=axis_txt, font=font)
+    for db in (-20, -10, 0, 10, 20):
+        y = y_of(db)
+        d.line([(pad_l, y), (width - pad_r, y)], fill=grid, width=1)
+        d.text((2, y - 6), f"{db:+d}", fill=axis_txt, font=font)
+
+    n = 220
+    pts = []
+    for i in range(n + 1):
+        t = i / n
+        f = f_min * (f_max / f_min) ** t
+        pts.append((x_of(f), y_of(fx.resp_db(g, f))))
+
+    zy = y_of(0)
+    d.polygon([(pts[0][0], zy)] + pts + [(pts[-1][0], zy)], fill=fill)
+    d.line(pts, fill=curve, width=3, joint="curve")
+    d.line([(pad_l, zy), (width - pad_r, zy)], fill=zero_line, width=1)
+
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    buf.seek(0)
+    return buf.getvalue()

@@ -3,3 +3,4 @@ davey
 python-dotenv>=1.0
 mutagen>=1.47
 pymongo[srv]>=4.13
+Pillow>=10

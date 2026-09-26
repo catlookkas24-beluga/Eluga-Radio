@@ -1,0 +1,13 @@
+# Free web-service mode (sleeps without pings, no persistent disk)
+services:
+  - type: web
+    name: eluga-radio
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: MONGODB_URI
+        sync: false

@@ -14,8 +14,12 @@ DEFAULTS = {
     "eq": {"bass": 0, "vocal": 0, "treble": 0},
     "eq_pro": {},
     "eq_pro_presets": {},
+    "eq_custom": [],
     "preamp": 0,
-    "adv": {"compressor": False, "reverb": 0, "width": 0, "normalize": False},
+    "adv": {
+        "compressor": False, "reverb": 0, "width": 0, "normalize": False,
+        "highpass": 0, "lowpass": 0, "shelf_ends": False, "deesser": 0, "loud_target": 0,
+    },
     "bg": "none",
     "volume": 60,
     "loop": "off",

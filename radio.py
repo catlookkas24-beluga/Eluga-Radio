@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import difflib
+import io
 import ipaddress
 import json
 import logging
@@ -360,14 +361,52 @@ class SavePresetModal(discord.ui.Modal, title="บันทึกพรีเซ
         await i.response.edit_message(embed=self.panel.embed(), view=self.panel)
 
 
+class CustomBandModal(discord.ui.Modal, title="เพิ่ม Custom Band (Parametric)"):
+    freq = discord.ui.TextInput(label=f"ความถี่ Hz ({fx.CUSTOM_FREQ_MIN}-{fx.CUSTOM_FREQ_MAX})", default="1000", max_length=6)
+    gain = discord.ui.TextInput(label=f"เกน dB (±{fx.CUSTOM_GAIN_MAX}, ติดลบ = ตัด/notch)", default="0", max_length=4)
+    q = discord.ui.TextInput(label=f"Q / ความกว้าง เป็น octave ({fx.CUSTOM_Q_MIN}-{fx.CUSTOM_Q_MAX})", default="1.0",
+                              max_length=4, required=False)
+
+    def __init__(self, panel: "EQPanel"):
+        super().__init__()
+        self.panel = panel
+
+    async def on_submit(self, i: discord.Interaction):
+        try:
+            f = max(fx.CUSTOM_FREQ_MIN, min(fx.CUSTOM_FREQ_MAX, int(float(self.freq.value))))
+        except ValueError:
+            f = 1000
+        try:
+            gn = max(-fx.CUSTOM_GAIN_MAX, min(fx.CUSTOM_GAIN_MAX, int(float(self.gain.value))))
+        except ValueError:
+            gn = 0
+        try:
+            qv = max(fx.CUSTOM_Q_MIN, min(fx.CUSTOM_Q_MAX, float(self.q.value or 1.0)))
+        except ValueError:
+            qv = 1.0
+        g = self.panel.g
+        custom = g.setdefault("eq_custom", [])
+        if len(custom) < fx.CUSTOM_BAND_MAX:
+            custom.append({"freq": f, "gain": gn, "q": round(qv, 2)})
+            self.panel.custom_idx = len(custom) - 1
+            self.panel.cog.store.save()
+        self.panel._build()
+        await self.panel._apply(i)
+
+
 class EQPanel(discord.ui.View):
-    """One interactive message flipping between the Basic / Pro / Advanced EQ tabs —
-    dropdown to switch mode, +/- buttons to adjust, Reset All always available."""
+    """One interactive message flipping between the Basic / Pro / Advanced EQ tabs.
+    Pro and Advanced each get a second-level dropdown once they outgrow one screen —
+    Pro: Bands / Custom (parametric) / Presets. Advanced: Dynamics / Filters / Loudness.
+    📈 Graph and ↺ Reset All are always on the last row."""
 
     def __init__(self, cog: "Radio", guild_id: int, mode: str = "basic", band: str | None = None):
-        super().__init__(timeout=None)  # was 300s — buttons kept silently dying mid-session; match Panel's persistent style
+        super().__init__(timeout=None)  # persistent — a 300s timeout used to kill buttons mid-session
         self.cog, self.guild_id, self.mode = cog, guild_id, mode
         self.band = band or fx.BANDS[0][0]
+        self.pro_sub = "bands"
+        self.adv_sub = "dynamics"
+        self.custom_idx: int | None = None
         self._build()
 
     @property
@@ -393,13 +432,19 @@ class EQPanel(discord.ui.View):
         mode_sel.callback = on_mode
         self.add_item(mode_sel)
 
+        extra_row4 = None
         if self.mode == "basic":
             self._build_basic()
         elif self.mode == "pro":
-            self._build_pro()
+            extra_row4 = self._build_pro()
         else:
-            self._build_advanced()
+            extra_row4 = self._build_advanced()
 
+        graph = discord.ui.Button(label="📈 Graph", style=discord.ButtonStyle.secondary, row=4)
+        graph.callback = self._show_graph
+        self.add_item(graph)
+        if extra_row4 is not None:
+            self.add_item(extra_row4)
         reset = discord.ui.Button(label="↺ Reset All", style=discord.ButtonStyle.danger, row=4)
         reset.callback = self._reset_all
         self.add_item(reset)
@@ -422,10 +467,36 @@ class EQPanel(discord.ui.View):
             await self._apply(i)
         return cb
 
-    # ---- Pro ---------------------------------------------------------------
+    # ---- Pro — Bands / Custom / Presets sub-pages ---------------------------
     def _build_pro(self):
+        sub_sel = discord.ui.Select(
+            placeholder="Pro: Bands / Custom / Presets", row=1,
+            options=[
+                discord.SelectOption(label="Bands (11 คงที่)", emoji="🎚️", value="bands", default=self.pro_sub == "bands"),
+                discord.SelectOption(label="Custom (parametric)", emoji="🧬", value="custom", default=self.pro_sub == "custom"),
+                discord.SelectOption(label="Presets", emoji="💾", value="presets", default=self.pro_sub == "presets"),
+            ],
+        )
+
+        async def on_sub(i: discord.Interaction):
+            self.pro_sub = i.data["values"][0]
+            self._build()
+            await i.response.edit_message(embed=self.embed(), view=self)
+
+        sub_sel.callback = on_sub
+        self.add_item(sub_sel)
+
+        if self.pro_sub == "bands":
+            self._build_pro_bands()
+            return None
+        elif self.pro_sub == "custom":
+            return self._build_pro_custom()
+        else:
+            return self._build_pro_presets()
+
+    def _build_pro_bands(self):
         band_sel = discord.ui.Select(
-            placeholder=f"แบนด์: {fx.BAND_SHORT[self.band]}", row=1,
+            placeholder=f"แบนด์: {fx.BAND_SHORT[self.band]}", row=2,
             options=[discord.SelectOption(label=fx.BAND_SHORT[k], value=k, default=k == self.band) for k, _ in fx.BANDS],
         )
 
@@ -437,42 +508,18 @@ class EQPanel(discord.ui.View):
         band_sel.callback = on_band
         self.add_item(band_sel)
 
-        band_minus = discord.ui.Button(label="แบนด์ −", style=discord.ButtonStyle.secondary, row=2)
-        band_plus = discord.ui.Button(label="แบนด์ +", style=discord.ButtonStyle.primary, row=2)
+        band_minus = discord.ui.Button(label="แบนด์ −", style=discord.ButtonStyle.secondary, row=3)
+        band_plus = discord.ui.Button(label="แบนด์ +", style=discord.ButtonStyle.primary, row=3)
         band_minus.callback = self._pro_step(-1)
         band_plus.callback = self._pro_step(1)
         self.add_item(band_minus)
         self.add_item(band_plus)
-
         pre_minus = discord.ui.Button(label="Preamp −", style=discord.ButtonStyle.primary, row=3)
         pre_plus = discord.ui.Button(label="Preamp +", style=discord.ButtonStyle.primary, row=3)
         pre_minus.callback = self._preamp_step(-1)
         pre_plus.callback = self._preamp_step(1)
         self.add_item(pre_minus)
         self.add_item(pre_plus)
-
-        save = discord.ui.Button(label="💾 Save Preset", style=discord.ButtonStyle.success, row=3)
-        save.callback = self._save_preset
-        self.add_item(save)
-
-        presets = self.g.get("eq_pro_presets") or {}
-        if presets:
-            load = discord.ui.Select(
-                placeholder="โหลดพรีเซ็ตที่บันทึกไว้...", row=4,
-                options=[discord.SelectOption(label=n, value=n) for n in list(presets)[:25]],
-            )
-
-            async def on_load(i: discord.Interaction):
-                p = presets.get(i.data["values"][0])
-                if p:
-                    g = self.g
-                    g["eq_pro"] = dict(p.get("bands") or {})
-                    g["preamp"] = p.get("preamp", 0)
-                    self.cog.store.save()
-                await self._apply(i)
-
-            load.callback = on_load
-            self.add_item(load)
 
     def _pro_step(self, direction):
         async def cb(i: discord.Interaction):
@@ -491,28 +538,205 @@ class EQPanel(discord.ui.View):
             await self._apply(i)
         return cb
 
+    def _build_pro_custom(self):
+        custom = self.g.get("eq_custom") or []
+        if custom:
+            if self.custom_idx is None or self.custom_idx >= len(custom):
+                self.custom_idx = 0
+            opts = [discord.SelectOption(label=f"{b['freq']}Hz  {b['gain']:+d}dB  Q{b.get('q', 1.0)}", value=str(idx),
+                                          default=idx == self.custom_idx) for idx, b in enumerate(custom)]
+        else:
+            opts = [discord.SelectOption(label="ยังไม่มี custom band — กด ＋ เพิ่มเลย", value="none")]
+        band_sel = discord.ui.Select(placeholder="เลือก custom band ที่จะแก้ไข...", row=2, options=opts)
+
+        async def on_pick(i: discord.Interaction):
+            v = i.data["values"][0]
+            if v != "none":
+                self.custom_idx = int(v)
+            self._build()
+            await i.response.edit_message(embed=self.embed(), view=self)
+
+        band_sel.callback = on_pick
+        self.add_item(band_sel)
+
+        freq_minus = discord.ui.Button(label="Freq −", style=discord.ButtonStyle.secondary, row=3, disabled=not custom)
+        freq_plus = discord.ui.Button(label="Freq +", style=discord.ButtonStyle.secondary, row=3, disabled=not custom)
+        gain_minus = discord.ui.Button(label="Gain −", style=discord.ButtonStyle.secondary, row=3, disabled=not custom)
+        gain_plus = discord.ui.Button(label="Gain +", style=discord.ButtonStyle.primary, row=3, disabled=not custom)
+        add_new = discord.ui.Button(label="＋ เพิ่มใหม่", style=discord.ButtonStyle.success, row=3)
+        freq_minus.callback = self._custom_step("freq", -1)
+        freq_plus.callback = self._custom_step("freq", 1)
+        gain_minus.callback = self._custom_step("gain", -1)
+        gain_plus.callback = self._custom_step("gain", 1)
+        add_new.callback = self._add_custom
+        for b in (freq_minus, freq_plus, gain_minus, gain_plus, add_new):
+            self.add_item(b)
+
+        remove = discord.ui.Button(label="🗑️ ลบตัวนี้", style=discord.ButtonStyle.danger, row=4, disabled=not custom)
+        remove.callback = self._remove_custom
+        return remove
+
+    def _custom_step(self, field, direction):
+        async def cb(i: discord.Interaction):
+            g = self.g
+            custom = g.get("eq_custom") or []
+            if not custom or self.custom_idx is None:
+                await self._apply(i)
+                return
+            b = custom[self.custom_idx]
+            if field == "freq":  # multiplicative step feels natural on a log-frequency scale
+                b["freq"] = max(fx.CUSTOM_FREQ_MIN, min(fx.CUSTOM_FREQ_MAX, round(b["freq"] * (1.08 if direction > 0 else 1 / 1.08))))
+            else:
+                b["gain"] = max(-fx.CUSTOM_GAIN_MAX, min(fx.CUSTOM_GAIN_MAX, b["gain"] + direction * 2))
+            self.cog.store.save()
+            await self._apply(i)
+        return cb
+
+    async def _add_custom(self, i: discord.Interaction):
+        await i.response.send_modal(CustomBandModal(self))
+
+    async def _remove_custom(self, i: discord.Interaction):
+        g = self.g
+        custom = g.get("eq_custom") or []
+        if custom and self.custom_idx is not None and self.custom_idx < len(custom):
+            custom.pop(self.custom_idx)
+            self.custom_idx = None
+            self.cog.store.save()
+        self._build()
+        await self._apply(i)
+
+    def _build_pro_presets(self):
+        presets = self.g.get("eq_pro_presets") or {}
+        if presets:
+            opts = [discord.SelectOption(label=n, value=n) for n in list(presets)[:25]]
+        else:
+            opts = [discord.SelectOption(label="ยังไม่มีพรีเซ็ตที่บันทึกไว้", value="none")]
+        load = discord.ui.Select(placeholder="โหลดพรีเซ็ตที่บันทึกไว้...", row=2, options=opts)
+
+        async def on_load(i: discord.Interaction):
+            v = i.data["values"][0]
+            if v != "none":
+                self._pending_preset = v
+                p = presets.get(v)
+                if p:
+                    g = self.g
+                    g["eq_pro"] = dict(p.get("bands") or {})
+                    g["preamp"] = p.get("preamp", 0)
+                    self.cog.store.save()
+            await self._apply(i)
+
+        load.callback = on_load
+        self.add_item(load)
+
+        save = discord.ui.Button(label="💾 Save Current As...", style=discord.ButtonStyle.success, row=3)
+        save.callback = self._save_preset
+        self.add_item(save)
+        return None
+
     async def _save_preset(self, i: discord.Interaction):
         await i.response.send_modal(SavePresetModal(self))
 
-    # ---- Advanced ----------------------------------------------------------
+    # ---- Advanced — Dynamics / Filters / Loudness sub-pages ------------------
     def _build_advanced(self):
+        sub_sel = discord.ui.Select(
+            placeholder="Advanced: Dynamics / Filters / Loudness", row=1,
+            options=[
+                discord.SelectOption(label="Dynamics", emoji="🗜️", value="dynamics", default=self.adv_sub == "dynamics"),
+                discord.SelectOption(label="Filters", emoji="🎛️", value="filters", default=self.adv_sub == "filters"),
+                discord.SelectOption(label="Loudness", emoji="📶", value="loudness", default=self.adv_sub == "loudness"),
+            ],
+        )
+
+        async def on_sub(i: discord.Interaction):
+            self.adv_sub = i.data["values"][0]
+            self._build()
+            await i.response.edit_message(embed=self.embed(), view=self)
+
+        sub_sel.callback = on_sub
+        self.add_item(sub_sel)
+
+        if self.adv_sub == "dynamics":
+            self._build_adv_dynamics()
+        elif self.adv_sub == "filters":
+            self._build_adv_filters()
+        else:
+            self._build_adv_loudness()
+        return None
+
+    def _build_adv_dynamics(self):
         adv = self.g["adv"]
         comp = discord.ui.Button(label=f"Compressor: {'on' if adv['compressor'] else 'off'}",
-                                  style=discord.ButtonStyle.success if adv["compressor"] else discord.ButtonStyle.secondary, row=1)
+                                  style=discord.ButtonStyle.success if adv["compressor"] else discord.ButtonStyle.secondary, row=2)
         comp.callback = self._toggle("compressor")
         self.add_item(comp)
-        norm = discord.ui.Button(label=f"Normalize: {'on' if adv['normalize'] else 'off'}",
-                                  style=discord.ButtonStyle.success if adv["normalize"] else discord.ButtonStyle.secondary, row=1)
-        norm.callback = self._toggle("normalize")
-        self.add_item(norm)
+        de_minus = discord.ui.Button(label="De-ess −", style=discord.ButtonStyle.secondary, row=2)
+        de_plus = discord.ui.Button(label="De-ess +", style=discord.ButtonStyle.secondary, row=2)
+        de_minus.callback = self._adv_step("deesser", -1, fx.DEESSER_MAX, fx.DEESSER_STEP)
+        de_plus.callback = self._adv_step("deesser", 1, fx.DEESSER_MAX, fx.DEESSER_STEP)
+        self.add_item(de_minus)
+        self.add_item(de_plus)
 
-        for row, (key, lbl, mx) in enumerate((("reverb", "Reverb", fx.ADV_REVERB_MAX), ("width", "Width", fx.ADV_WIDTH_MAX)), start=2):
+        for row, (key, lbl, mx) in enumerate((("reverb", "Reverb", fx.ADV_REVERB_MAX), ("width", "Width", fx.ADV_WIDTH_MAX)), start=3):
             minus = discord.ui.Button(label=f"{lbl} −", style=discord.ButtonStyle.secondary, row=row)
             plus = discord.ui.Button(label=f"{lbl} +", style=discord.ButtonStyle.secondary, row=row)
-            minus.callback = self._adv_step(key, -1, mx)
-            plus.callback = self._adv_step(key, 1, mx)
+            minus.callback = self._adv_step(key, -1, mx, fx.ADV_STEP)
+            plus.callback = self._adv_step(key, 1, mx, fx.ADV_STEP)
             self.add_item(minus)
             self.add_item(plus)
+
+    def _build_adv_filters(self):
+        hp_minus = discord.ui.Button(label="Highpass −", style=discord.ButtonStyle.secondary, row=2)
+        hp_plus = discord.ui.Button(label="Highpass +", style=discord.ButtonStyle.secondary, row=2)
+        lp_minus = discord.ui.Button(label="Lowpass −", style=discord.ButtonStyle.secondary, row=2)
+        lp_plus = discord.ui.Button(label="Lowpass +", style=discord.ButtonStyle.secondary, row=2)
+        hp_minus.callback = self._filter_step("highpass", -1)
+        hp_plus.callback = self._filter_step("highpass", 1)
+        lp_minus.callback = self._filter_step("lowpass", -1)
+        lp_plus.callback = self._filter_step("lowpass", 1)
+        for b in (hp_minus, hp_plus, lp_minus, lp_plus):
+            self.add_item(b)
+
+        adv = self.g["adv"]
+        shelf = discord.ui.Button(label=f"Shelf Ends: {'on' if adv['shelf_ends'] else 'off'}",
+                                   style=discord.ButtonStyle.success if adv["shelf_ends"] else discord.ButtonStyle.secondary, row=3)
+        shelf.callback = self._toggle("shelf_ends")
+        self.add_item(shelf)
+
+    def _filter_step(self, key, direction):
+        lo, hi, step = (fx.HP_MIN, fx.HP_MAX, fx.HP_STEP) if key == "highpass" else (fx.LP_MIN, fx.LP_MAX, fx.LP_STEP)
+
+        async def cb(i: discord.Interaction):
+            g = self.g
+            cur = g["adv"].get(key) or 0
+            if cur == 0:  # off -> jump straight into range on first press
+                cur = lo if direction > 0 else 0
+            nxt = cur + direction * step
+            g["adv"][key] = 0 if nxt < lo else min(hi, nxt)
+            self.cog.store.save()
+            await self._apply(i)
+        return cb
+
+    def _build_adv_loudness(self):
+        adv = self.g["adv"]
+        norm = discord.ui.Button(label=f"Auto Gain (dynaudnorm): {'on' if adv['normalize'] else 'off'}",
+                                  style=discord.ButtonStyle.success if adv["normalize"] else discord.ButtonStyle.secondary, row=2)
+        norm.callback = self._toggle("normalize")
+        self.add_item(norm)
+        cur = adv.get("loud_target", 0)
+        loud = discord.ui.Button(label=f"Loudness Match: {'off' if not cur else f'-{cur} LUFS'}",
+                                  style=discord.ButtonStyle.success if cur else discord.ButtonStyle.secondary, row=2)
+        loud.callback = self._cycle_loud
+        self.add_item(loud)
+
+    async def _cycle_loud(self, i: discord.Interaction):
+        g = self.g
+        cur = g["adv"].get("loud_target", 0)
+        opts = fx.LOUD_TARGETS
+        nxt = opts[(opts.index(cur) + 1) % len(opts)] if cur in opts else opts[0]
+        g["adv"]["loud_target"] = nxt
+        self.cog.store.save()
+        self._build()
+        await self._apply(i)
 
     def _toggle(self, key):
         async def cb(i: discord.Interaction):
@@ -523,10 +747,10 @@ class EQPanel(discord.ui.View):
             await self._apply(i)
         return cb
 
-    def _adv_step(self, key, direction, maximum):
+    def _adv_step(self, key, direction, maximum, step):
         async def cb(i: discord.Interaction):
             g = self.g
-            g["adv"][key] = max(0, min(maximum, g["adv"][key] + direction * fx.ADV_STEP))
+            g["adv"][key] = max(0, min(maximum, g["adv"][key] + direction * step))
             self.cog.store.save()
             await self._apply(i)
         return cb
@@ -536,11 +760,20 @@ class EQPanel(discord.ui.View):
         g = self.g
         g["eq"] = dict(fx.EQ_DEFAULTS)
         g["eq_pro"] = {}
+        g["eq_custom"] = []
         g["preamp"] = 0
         g["adv"] = dict(fx.ADV_DEFAULTS)
+        self.custom_idx = None
         self.cog.store.save()
         self._build()
         await self._apply(i)
+
+    async def _show_graph(self, i: discord.Interaction):
+        png = theme.render_eq_graph(self.g)
+        await i.response.send_message(
+            content="📈 กราฟ Frequency Response (โดยประมาณ)",
+            file=discord.File(io.BytesIO(png), filename="eq.png"), ephemeral=True,
+        )
 
     async def _apply(self, i: discord.Interaction):
         p = self.cog.players.get(self.guild_id)
@@ -559,24 +792,50 @@ class EQPanel(discord.ui.View):
                 v = e[key]
                 emb.add_field(name=f"{ic} {label}", value=f"`{v:+3d} dB`\n{fx.slider(v, fx.BASIC_MAX)}", inline=True)
         elif self.mode == "pro":
-            pro = g.get("eq_pro") or {}
-            preamp = g.get("preamp", 0)
-            emb.title = "⚡ Pro EQ — 11-band"
-            emb.description = (f"**Preamp** `{preamp:+3d} dB`\n{fx.slider(preamp, fx.PREAMP_MAX, width=13)}\n"
-                                f"กำลังปรับ: **{fx.BAND_SHORT[self.band]}Hz** · ±{fx.PRO_MAX} dB ทีละ {fx.PRO_STEP} dB")
-            for key, _ in fx.BANDS:
-                v = pro.get(key, 0) or 0
-                mark = "🟢" if key == self.band else "🎚️"
-                emb.add_field(name=f"{mark} {fx.BAND_SHORT[key]}Hz", value=f"`{v:+3d}dB`\n{fx.slider(v, fx.PRO_MAX, width=7)}", inline=True)
+            emb.title = "⚡ Pro EQ — 11-band + Custom + Presets"
+            if self.pro_sub == "bands":
+                pro = g.get("eq_pro") or {}
+                preamp = g.get("preamp", 0)
+                emb.description = (f"**Preamp** `{preamp:+3d} dB`\n{fx.slider(preamp, fx.PREAMP_MAX, width=13)}\n"
+                                    f"กำลังปรับ: **{fx.BAND_SHORT[self.band]}Hz** · ±{fx.PRO_MAX} dB ทีละ {fx.PRO_STEP} dB")
+                for key, _ in fx.BANDS:
+                    v = pro.get(key, 0) or 0
+                    mark = "🟢" if key == self.band else "🎚️"
+                    emb.add_field(name=f"{mark} {fx.BAND_SHORT[key]}Hz", value=f"`{v:+3d}dB`\n{fx.slider(v, fx.PRO_MAX, width=7)}", inline=True)
+            elif self.pro_sub == "custom":
+                custom = g.get("eq_custom") or []
+                emb.description = (f"🧬 **Custom parametric bands** ({len(custom)}/{fx.CUSTOM_BAND_MAX}) — ความถี่/Q ปรับเองได้อิสระ "
+                                    f"เกนติดลบแคบ ๆ = notch ตัดเสียงแหลมเฉพาะจุด")
+                if not custom:
+                    emb.add_field(name="ยังไม่มี custom band", value="กด ＋ เพิ่มใหม่ เพื่อเริ่ม", inline=False)
+                for idx, b in enumerate(custom):
+                    mark = "🟢" if idx == self.custom_idx else "🧬"
+                    emb.add_field(name=f"{mark} {b['freq']}Hz", value=f"`{b['gain']:+d}dB` · Q{b.get('q', 1.0)}", inline=True)
+            else:
+                presets = g.get("eq_pro_presets") or {}
+                emb.description = f"💾 **พรีเซ็ตที่บันทึกไว้** ({len(presets)}) — โหลด/บันทึกชุด Pro EQ + Preamp ของคุณเอง"
+                if presets:
+                    emb.add_field(name="รายชื่อ", value="\n".join(f"• {n}" for n in list(presets)[:10]), inline=False)
         else:
             a = g["adv"]
             emb.title = "🎙️ Advanced EQ"
-            emb.description = "⚠️ บางค่าอาจทำให้เสียงแตกหรือดังผิดปกติ ปรับอย่างระมัดระวัง 🔊"
-            emb.add_field(name="🗜️ Compressor", value="🟢 on" if a["compressor"] else "⚪ off", inline=True)
-            emb.add_field(name="📶 Normalize", value="🟢 on" if a["normalize"] else "⚪ off", inline=True)
-            emb.add_field(name="\u200b", value="\u200b", inline=True)
-            emb.add_field(name="🌊 Reverb", value=f"`{a['reverb']}`\n{fx.slider(a['reverb'], fx.ADV_REVERB_MAX, width=9, centered=False)}", inline=True)
-            emb.add_field(name="↔️ Stereo Width", value=f"`{a['width']}`\n{fx.slider(a['width'], fx.ADV_WIDTH_MAX, width=9, centered=False)}", inline=True)
+            if self.adv_sub == "dynamics":
+                emb.description = "⚠️ บางค่าอาจทำให้เสียงแตกหรือดังผิดปกติ ปรับอย่างระมัดระวัง 🔊 (มี limiter กันแตกอัตโนมัติอยู่ท้ายเชนเสมอ)"
+                emb.add_field(name="🗜️ Compressor", value="🟢 on" if a["compressor"] else "⚪ off", inline=True)
+                emb.add_field(name="🎯 De-esser (dynamic)", value=f"`{a['deesser']}%`\n{fx.slider(a['deesser'], fx.DEESSER_MAX, width=9, centered=False)}", inline=True)
+                emb.add_field(name="\u200b", value="\u200b", inline=True)
+                emb.add_field(name="🌊 Reverb", value=f"`{a['reverb']}`\n{fx.slider(a['reverb'], fx.ADV_REVERB_MAX, width=9, centered=False)}", inline=True)
+                emb.add_field(name="↔️ Stereo Width", value=f"`{a['width']}`\n{fx.slider(a['width'], fx.ADV_WIDTH_MAX, width=9, centered=False)}", inline=True)
+            elif self.adv_sub == "filters":
+                emb.description = "🎛️ Highpass ตัดเสียงรัมเบิลด้านล่าง · Lowpass ตัดความถี่สูงด้านบน · Shelf Ends ทำให้แบนด์ 32Hz/16kHz เป็นชั้นวางแทนระฆัง"
+                emb.add_field(name="🔺 Highpass", value=("`off`" if not a["highpass"] else f"`{a['highpass']} Hz`"), inline=True)
+                emb.add_field(name="🔻 Lowpass", value=("`off`" if not a["lowpass"] else f"`{a['lowpass']} Hz`"), inline=True)
+                emb.add_field(name="📐 Shelf Ends", value="🟢 on" if a["shelf_ends"] else "⚪ off", inline=True)
+            else:
+                emb.description = "📶 Auto Gain ปรับความดังแบบเรียลไทม์ต่อเนื่อง · Loudness Match ล็อกความดังเข้ามาตรฐาน LUFS ให้ทุกเพลงดังเท่ากัน"
+                emb.add_field(name="⚙️ Auto Gain", value="🟢 on" if a["normalize"] else "⚪ off", inline=True)
+                emb.add_field(name="🎚️ Loudness Match",
+                               value=("`off`" if not a["loud_target"] else f"`-{a['loud_target']} LUFS`"), inline=True)
         emb.set_footer(text=f"🎧 signal: {fx.label(g)}")
         return emb
 
@@ -1033,12 +1292,17 @@ class Radio(commands.Cog):
         if p:
             await p.restart_in_place()
 
-    @tune.command(name="eq_advanced", description="⚠ Advanced: compressor/reverb/stereo width/normalize — อาจทำให้เสียงเพี้ยนได้")
+    @tune.command(name="eq_advanced", description="⚠ Advanced: compressor/reverb/width/normalize/highpass/lowpass/deesser/loudness — อาจทำให้เสียงเพี้ยนได้")
     async def t_eq_advanced(self, i: discord.Interaction,
                              compressor: bool | None = None,
                              reverb: app_commands.Range[int, 0, 100] | None = None,
                              width: app_commands.Range[int, 0, 200] | None = None,
-                             normalize: bool | None = None):
+                             normalize: bool | None = None,
+                             highpass: app_commands.Range[int, 0, fx.HP_MAX] | None = None,
+                             lowpass: app_commands.Range[int, 0, fx.LP_MAX] | None = None,
+                             shelf_ends: bool | None = None,
+                             deesser: app_commands.Range[int, 0, fx.DEESSER_MAX] | None = None,
+                             loudness_lufs: app_commands.Choice[int] | None = None):
         g = self.store.get(i.guild.id)
         if compressor is not None:
             g["adv"]["compressor"] = compressor
@@ -1048,16 +1312,33 @@ class Radio(commands.Cog):
             g["adv"]["width"] = width
         if normalize is not None:
             g["adv"]["normalize"] = normalize
+        if highpass is not None:
+            g["adv"]["highpass"] = 0 if highpass < fx.HP_MIN else highpass
+        if lowpass is not None:
+            g["adv"]["lowpass"] = 0 if lowpass and lowpass < fx.LP_MIN else lowpass
+        if shelf_ends is not None:
+            g["adv"]["shelf_ends"] = shelf_ends
+        if deesser is not None:
+            g["adv"]["deesser"] = deesser
+        if loudness_lufs is not None:
+            g["adv"]["loud_target"] = loudness_lufs.value
         self.store.save()
         a = g["adv"]
         await i.response.send_message(
-            "🧪 **Advanced mode** — สำหรับผู้ใช้ที่เข้าใจการประมวลผลเสียง การตั้งค่าบางอย่างอาจทำให้เสียงผิดเพี้ยนหรือ clip ได้\n"
-            f"compressor `{a['compressor']}` · reverb `{a['reverb']}` · width `{a['width']}` · normalize `{a['normalize']}`",
+            "🧪 **Advanced mode** — สำหรับผู้ใช้ที่เข้าใจการประมวลผลเสียง การตั้งค่าบางอย่างอาจทำให้เสียงผิดเพี้ยนหรือ clip ได้ "
+            "(มี limiter กันแตกอัตโนมัติอยู่ท้ายเชนเสมอ)\n"
+            f"compressor `{a['compressor']}` · reverb `{a['reverb']}` · width `{a['width']}` · normalize `{a['normalize']}`\n"
+            f"highpass `{a['highpass'] or 'off'}` · lowpass `{a['lowpass'] or 'off'}` · shelf_ends `{a['shelf_ends']}` · "
+            f"deesser `{a['deesser']}%` · loudness `{('-' + str(a['loud_target']) + ' LUFS') if a['loud_target'] else 'off'}`",
             ephemeral=True,
         )
         p = self.players.get(i.guild.id)
         if p:
             await p.restart_in_place()
+
+    @t_eq_advanced.autocomplete("loudness_lufs")
+    async def _loudness_autocomplete(self, i: discord.Interaction, current: str):
+        return [app_commands.Choice(name=("off" if v == 0 else f"-{v} LUFS"), value=v) for v in fx.LOUD_TARGETS]
 
     @tune.command(name="eq", description="เปิดแผงปรับ EQ แบบอินเทอร์แอคทีฟ (Basic/Pro/Advanced)")
     async def t_eq(self, i: discord.Interaction):
@@ -1069,10 +1350,15 @@ class Radio(commands.Cog):
         g = self.store.get(i.guild.id)
         e = g["eq"]
         bands = ", ".join(f"{lbl} {g['eq_pro'][k]:+d}" for k, lbl in fx.BANDS if g["eq_pro"].get(k)) or "—"
+        custom = g.get("eq_custom") or []
+        custom_txt = ", ".join(f"{b['freq']}Hz{b['gain']:+d}dB(Q{b.get('q', 1.0)})" for b in custom) or "—"
         a = g["adv"]
         desc = (f"**Basic** — bass {e['bass']:+d} · vocal {e['vocal']:+d} · treble {e['treble']:+d}\n"
                 f"**Pro** — preamp {g['preamp']:+d} dB · bands: {bands}\n"
+                f"**Custom** — {custom_txt}\n"
                 f"**Advanced** — compressor {a['compressor']} · reverb {a['reverb']} · width {a['width']} · normalize {a['normalize']}\n"
+                f"**Filters** — highpass {a['highpass'] or 'off'} · lowpass {a['lowpass'] or 'off'} · shelf_ends {a['shelf_ends']}\n"
+                f"**Dynamic/Loudness** — deesser {a['deesser']}% · loudness {('-' + str(a['loud_target']) + ' LUFS') if a['loud_target'] else 'off'}\n"
                 f"**Volume** — {g['volume']}%")
         await i.response.send_message(embed=discord.Embed(color=theme.color(g), title="🎧 EQ / audio settings", description=desc), ephemeral=True)
 
@@ -1081,6 +1367,7 @@ class Radio(commands.Cog):
         g = self.store.get(i.guild.id)
         g["eq"] = dict(fx.EQ_DEFAULTS)
         g["eq_pro"] = {}
+        g["eq_custom"] = []
         g["preamp"] = 0
         g["adv"] = dict(fx.ADV_DEFAULTS)
         self.store.save()
@@ -1092,7 +1379,7 @@ class Radio(commands.Cog):
     @tune.command(name="eq_export", description="ส่งออกค่าปรับเสียงเป็นโค้ด แชร์ให้เซิร์ฟเวอร์อื่นได้")
     async def t_eq_export(self, i: discord.Interaction):
         g = self.store.get(i.guild.id)
-        payload = {"eq": g["eq"], "eq_pro": g["eq_pro"], "preamp": g["preamp"], "adv": g["adv"]}
+        payload = {"eq": g["eq"], "eq_pro": g["eq_pro"], "eq_custom": g.get("eq_custom") or [], "preamp": g["preamp"], "adv": g["adv"]}
         code = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
         await i.response.send_message(f"💾 โค้ดพรีเซ็ตของคุณ (ใช้กับ `/tune eq_import`):\n```\n{code}\n```", ephemeral=True)
 
@@ -1103,10 +1390,23 @@ class Radio(commands.Cog):
             g = self.store.get(i.guild.id)
             g["eq"] = {**fx.EQ_DEFAULTS, **{k: v for k, v in payload.get("eq", {}).items() if k in fx.EQ_DEFAULTS}}
             g["eq_pro"] = {k: v for k, v in payload.get("eq_pro", {}).items() if k in dict(fx.BANDS)}
+            custom_in = payload.get("eq_custom", [])[:fx.CUSTOM_BAND_MAX] if isinstance(payload.get("eq_custom"), list) else []
+            g["eq_custom"] = [
+                {"freq": max(fx.CUSTOM_FREQ_MIN, min(fx.CUSTOM_FREQ_MAX, int(b.get("freq", 1000)))),
+                 "gain": max(-fx.CUSTOM_GAIN_MAX, min(fx.CUSTOM_GAIN_MAX, int(b.get("gain", 0)))),
+                 "q": max(fx.CUSTOM_Q_MIN, min(fx.CUSTOM_Q_MAX, float(b.get("q", 1.0))))}
+                for b in custom_in if isinstance(b, dict)
+            ]
             g["preamp"] = max(-20, min(20, int(payload.get("preamp", 0))))
             adv = payload.get("adv", {})
-            g["adv"] = {**fx.ADV_DEFAULTS, "compressor": bool(adv.get("compressor")), "reverb": max(0, min(100, int(adv.get("reverb", 0)))),
-                       "width": max(0, min(200, int(adv.get("width", 0)))), "normalize": bool(adv.get("normalize"))}
+            g["adv"] = {**fx.ADV_DEFAULTS,
+                        "compressor": bool(adv.get("compressor")), "reverb": max(0, min(100, int(adv.get("reverb", 0)))),
+                        "width": max(0, min(200, int(adv.get("width", 0)))), "normalize": bool(adv.get("normalize")),
+                        "highpass": max(0, min(fx.HP_MAX, int(adv.get("highpass", 0)))),
+                        "lowpass": max(0, min(fx.LP_MAX, int(adv.get("lowpass", 0)))),
+                        "shelf_ends": bool(adv.get("shelf_ends")),
+                        "deesser": max(0, min(fx.DEESSER_MAX, int(adv.get("deesser", 0)))),
+                        "loud_target": adv.get("loud_target", 0) if adv.get("loud_target") in fx.LOUD_TARGETS else 0}
         except Exception:
             return await i.response.send_message("▒ โค้ดนี้ใช้ไม่ได้", ephemeral=True)
         self.store.save()
